@@ -28,7 +28,7 @@ const MAX_WORKER_RESTARTS = 1;
 export type WorkerProgressCallback = (progressMetrics: ProgressMetrics) => void;
 
 type WorkerStateChangeCallback = (worker: SimWorker, change: 'ready' | 'disable' | 'error', error?: Error) => void;
-type WorkerPoolWorkerNumCallback = (numSet: number, ready: number, failed:number) => void;
+type WorkerPoolWorkerNumCallback = (numSet: number, ready: number, failed: number) => void;
 
 /**
  * Create random id for requests.
@@ -48,13 +48,15 @@ export class WorkerPool {
 	private failedWorkerCount = 0;
 	private readonly isWasmPromise: Promise<boolean>;
 	private isWasmPromiseResolver?: (isWasm: boolean) => void;
+	private isWasmPromiseRejector?: (error: any) => void;
 	private readonly workerNumChangedCallback: WorkerPoolWorkerNumCallback;
 
 	constructor(numWorkers: number, onWorkerNumChange: WorkerPoolWorkerNumCallback) {
 		this.workers = [];
 		this.workersDisabled = [];
-		this.isWasmPromise = new Promise<boolean>(resolve => {
+		this.isWasmPromise = new Promise<boolean>((resolve, reject) => {
 			this.isWasmPromiseResolver = resolve;
+			this.isWasmPromiseRejector = reject;
 		});
 		this.workerNumChangedCallback = onWorkerNumChange;
 		this.setNumWorkers(numWorkers);
@@ -80,15 +82,16 @@ export class WorkerPool {
 			worker.disable(true);
 			for (let i = 0; i < this.workers.length; i++) {
 				if (this.workers[i].workerId == worker.workerId) {
-					this.workers.splice(i);
+					this.workers.splice(i, 1);
 					break;
 				}
 			}
 
 			console.error(`Worker ${worker.workerId} failed to reinitialize after an error, letting it go :(`);
 
-			// This here is so users get some direct feedback if workers fail entirely.
 			if (this.workers.length == 0) {
+				this.isWasmPromiseRejector!(new Error('No worker loaded successfully!'));
+				// This here is so users get some direct feedback if workers fail entirely.
 				alert('All workers failed to load, sim will not work!\n\nThe browser console may have more details.\n\nError: ' + errorString);
 			}
 		} else if (change == 'ready') {
@@ -109,7 +112,7 @@ export class WorkerPool {
 	};
 
 	async setNumWorkers(numWorkers: number) {
-		this.targetWorkerCount = Math.max(numWorkers, navigator.hardwareConcurrency);
+		this.targetWorkerCount = Math.min(numWorkers, navigator.hardwareConcurrency);
 		this.failedWorkerCount = 0;
 
 		if (this.workers.length == 0) {
@@ -150,14 +153,20 @@ export class WorkerPool {
 		return this.workers.length;
 	}
 
-	private getLeastBusyWorker(): SimWorker {
-		return this.workers.reduce((curMinWorker, nextWorker) =>
-			curMinWorker.getSimTaskWorkAmount() < nextWorker.getSimTaskWorkAmount() ? curMinWorker : nextWorker,
-		);
+	private async getLeastBusyWorker(): Promise<SimWorker> {
+		// Make sure we have at least one ready worker in case calling functions don't make sure of it.
+		await this.isWasmPromise;
+		return this.workers.reduce((curMinWorker, nextWorker) => {
+			if (curMinWorker.isReady && nextWorker.isReady) {
+				return curMinWorker.getSimTaskWorkAmount() < nextWorker.getSimTaskWorkAmount() ? curMinWorker : nextWorker;
+			}
+			return curMinWorker.isReady ? curMinWorker : nextWorker;
+		});
 	}
 
 	async makeApiCall(requestName: SimRequest, request: Uint8Array): Promise<Uint8Array> {
-		return await this.getLeastBusyWorker().doApiCall(requestName, request, generateRequestId(requestName));
+		const worker = await this.getLeastBusyWorker();
+		return await worker.doApiCall(requestName, request, generateRequestId(requestName));
 	}
 
 	async computeStats(request: ComputeStatsRequest): Promise<ComputeStatsResult> {
@@ -170,7 +179,7 @@ export class WorkerPool {
 	}
 
 	async statWeightsAsync(request: StatWeightsRequest, onProgress: WorkerProgressCallback, signals: SimSignals): Promise<StatWeightsResult> {
-		const worker = this.getLeastBusyWorker();
+		const worker = await this.getLeastBusyWorker();
 		worker.log('Stat weights request: ' + StatWeightsRequest.toJsonString(request));
 		const id = generateRequestId(SimRequest.statWeightsAsync);
 
@@ -196,7 +205,7 @@ export class WorkerPool {
 	}
 
 	async bulkSimAsync(request: BulkSimRequest, onProgress: WorkerProgressCallback, signals: SimSignals): Promise<BulkSimResult> {
-		const worker = this.getLeastBusyWorker();
+		const worker = await this.getLeastBusyWorker();
 		worker.log('bulk sim request: ' + BulkSimRequest.toJsonString(request, { enumAsInteger: true }));
 		const id = generateRequestId(SimRequest.bulkSimAsync);
 
@@ -214,7 +223,7 @@ export class WorkerPool {
 
 	// Calculate combos and return counts
 	async bulkSimCombosAsync(request: BulkSimCombosRequest): Promise<BulkSimCombosResult> {
-		const worker = this.getLeastBusyWorker();
+		const worker = await this.getLeastBusyWorker();
 		worker.log('bulk sim combinations request: ' + BulkSimCombosRequest.toJsonString(request, { enumAsInteger: true }));
 		const id = generateRequestId(SimRequest.bulkSimCombos);
 
@@ -224,7 +233,7 @@ export class WorkerPool {
 	}
 
 	async raidSimAsync(request: RaidSimRequest, onProgress: WorkerProgressCallback, signals: SimSignals): Promise<RaidSimResult> {
-		const worker = this.getLeastBusyWorker();
+		const worker = await this.getLeastBusyWorker();
 		worker.log('Raid sim request: ' + RaidSimRequest.toJsonString(request));
 		const id = generateRequestId(SimRequest.raidSimAsync);
 
