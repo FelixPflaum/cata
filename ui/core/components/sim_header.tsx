@@ -12,6 +12,7 @@ import { Importer } from './importers';
 import { SettingsMenu } from './settings_menu';
 import { SimTab } from './sim_tab';
 import { SocialLinks } from './social_links';
+import { buildWorkerInfo } from './worker_info';
 
 interface ToolbarLinkArgs {
 	parent: HTMLElement;
@@ -39,6 +40,7 @@ export class SimHeader extends Component {
 
 		this.knownIssuesContent = (<ul className="text-start ps-3 mb-0"></ul>) as HTMLUListElement;
 		this.knownIssuesLink = this.addKnownIssuesLink();
+		this.addWorkerInfo();
 		this.addBugReportLink();
 		this.addDownloadBinaryLink();
 		this.addSimOptionsLink();
@@ -196,6 +198,11 @@ export class SimHeader extends Component {
 				classes: 'downbin',
 			});
 		}
+	}
+
+	private addWorkerInfo() {
+		const elem = this.simToolbar.appendChild(<SimToolbarItem></SimToolbarItem>);
+		buildWorkerInfo(elem, this.simUI.sim, true);
 	}
 
 	private addSimOptionsLink() {

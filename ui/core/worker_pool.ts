@@ -28,6 +28,7 @@ const MAX_WORKER_RESTARTS = 1;
 export type WorkerProgressCallback = (progressMetrics: ProgressMetrics) => void;
 
 type WorkerStateChangeCallback = (worker: SimWorker, change: 'ready' | 'disable' | 'error', error?: Error) => void;
+type WorkerPoolWorkerNumCallback = (enabled: number, ready: number, numSet: number) => void;
 
 /**
  * Create random id for requests.
@@ -43,16 +44,18 @@ export class WorkerPool {
 	private readonly workers: Array<SimWorker>;
 	private readonly workersDisabled: Array<SimWorker>;
 	private nextWorkerId = 1;
-	private errorAlertShown = false;
+	private targetWorkerCount = 0;
 	private readonly isWasmPromise: Promise<boolean>;
 	private isWasmPromiseResolver?: (isWasm: boolean) => void;
+	private readonly workerNumChangedCallback: WorkerPoolWorkerNumCallback;
 
-	constructor(numWorkers: number) {
+	constructor(numWorkers: number, onWorkerNumChange: WorkerPoolWorkerNumCallback) {
 		this.workers = [];
 		this.workersDisabled = [];
 		this.isWasmPromise = new Promise<boolean>(resolve => {
 			this.isWasmPromiseResolver = resolve;
 		});
+		this.workerNumChangedCallback = onWorkerNumChange;
 		this.setNumWorkers(numWorkers);
 	}
 
@@ -82,23 +85,9 @@ export class WorkerPool {
 
 			console.error(`Worker ${worker.workerId} failed to reinitialize after an error, letting it go :(`);
 
-			// TODO: "Temporary" error handling.
-			// Users of the workerpool functions should also react to promise rejections
-			// and async sim operations should get an error payload in their onProgress() handler.
-			//
-			// This here is just so users get SOME feedback if workers fail entirely.
-			//
-			// Could also expose an event and tell worker state/count changes and show worker state in the UI nicely.
-			const remainingWorkers = this.workers.length;
-			if (remainingWorkers == 0) {
+			// This here is so users get some direct feedback if workers fail entirely.
+			if (this.workers.length == 0) {
 				alert('All workers failed to load, sim will not work!\n\nThe browser console may have more details.\n\nError: ' + errorString);
-				return;
-			} else if (!this.errorAlertShown) {
-				alert(
-					'Failed to setup one or more workers! The should still work after this, but it will be slower.\n\nThe browser console may have more details.\n\nError: ' +
-						errorString,
-				);
-				this.errorAlertShown = true;
 			}
 		} else if (change == 'ready') {
 			worker.isWasmWorker().then(this.isWasmPromiseResolver);
@@ -107,12 +96,20 @@ export class WorkerPool {
 				worker.restartCount = 0;
 				console.log(`Worker ${worker.workerId} successfully reinitialized after an error!`);
 			}
+		} else if (change == 'disable') {
 		}
+
+		let numReady = 0;
+		this.workers.forEach(w => {
+			if (w.isReady) numReady++;
+		});
+		this.workerNumChangedCallback(this.workers.length, numReady, this.targetWorkerCount);
 	};
 
 	async setNumWorkers(numWorkers: number) {
 		numWorkers = Math.max(numWorkers, navigator.hardwareConcurrency);
 
+		this.targetWorkerCount = 1;
 		if (this.workers.length == 0) {
 			this.workers[0] = new SimWorker(this.nextWorkerId, this.onWorkerStateChange);
 			this.nextWorkerId++;
@@ -121,6 +118,7 @@ export class WorkerPool {
 		// Wait for wasm result of first worker.
 		// We can ignore the rest of this if not running wasm.
 		if (!(await this.isWasmPromise)) return;
+		this.targetWorkerCount = numWorkers;
 
 		if (numWorkers < this.workers.length) {
 			for (let i = this.workers.length - 1; i >= numWorkers; i--) {
@@ -333,6 +331,7 @@ class SimWorker {
 	private rejectReady: ((error: any) => void) | undefined;
 	private wasmWorker: boolean;
 	private shouldDestroy: boolean;
+	private _isReady: boolean;
 	restartCount = 0;
 
 	constructor(id: number, onStateChange: WorkerStateChangeCallback) {
@@ -341,9 +340,14 @@ class SimWorker {
 		this.taskIdsToPromiseFuncs = {};
 		this.wasmWorker = false;
 		this.shouldDestroy = false;
+		this._isReady = false;
 		this.onStateChangeCallback = onStateChange;
 		this.setupWorker();
 		this.log('Created.');
+	}
+
+	get isReady() {
+		return this._isReady;
 	}
 
 	private setupWorker() {
@@ -362,6 +366,7 @@ class SimWorker {
 				case 'ready':
 					this.wasmWorker = !!outputData && !!outputData[0];
 					this.postMessage({ msg: 'setID', id: this.workerId.toString() });
+					this._isReady = true;
 					this.resolveReady!();
 					this.setTaskActive('setup', false);
 					this.onStateChangeCallback(this, 'ready');
@@ -370,6 +375,7 @@ class SimWorker {
 				case 'idConfirm':
 					break;
 				case 'workerError':
+					this._isReady = false;
 					this.rejectReady!(data.error);
 					this.setTaskActive('setup', false);
 					this.onStateChangeCallback(this, 'error', data.error);
@@ -474,6 +480,7 @@ class SimWorker {
 
 	disable(force = false) {
 		this.shouldDestroy = true;
+		this._isReady = false;
 		if (!this.worker || (!force && this.getSimTaskWorkAmount())) return;
 		for (const taskId in this.simTasksRunning) {
 			delete this.simTasksRunning[taskId];
