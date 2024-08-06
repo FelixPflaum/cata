@@ -144,15 +144,6 @@ export class Sim {
 	constructor({ type }: SimProps = {}) {
 		this.type = type ?? SimType.SimTypeIndividual;
 
-		this.workerPool = new WorkerPool(1);
-		this.wasmConcurrencyChangeEmitter.on(async () => {
-			// Prevent using worker concurrency when not running wasm. Local sim has native threading.
-			if (await this.workerPool.isWasm()) {
-				const nWorker = Math.max(1, Math.min(this.wasmConcurrency, navigator.hardwareConcurrency));
-				this.workerPool.setNumWorkers(nWorker);
-			}
-		});
-
 		let wasmConcurrencySetting = parseInt(window.localStorage.getItem(WASM_CONCURRENCY_STORAGE_KEY) ?? 'NaN');
 		if (isNaN(wasmConcurrencySetting)) {
 			wasmConcurrencySetting = 0;
@@ -163,12 +154,17 @@ export class Sim {
 			}
 		}
 		this.setWasmConcurrency(TypedEvent.nextEventID(), wasmConcurrencySetting);
+		this.workerPool = new WorkerPool(wasmConcurrencySetting);
+		this.wasmConcurrencyChangeEmitter.on(async () => this.workerPool.setNumWorkers(this.wasmConcurrency));
 
 		this.signalManager = new SimSignalManager();
 
-		this._initPromise = Database.get().then(db => {
-			this.db_ = db;
-		});
+		this._initPromise = Promise.all([
+			Database.get().then(db => {
+				this.db_ = db;
+			}),
+			this.workerPool.waitForAnyWorkerReady(),
+		]);
 
 		this.raid = new Raid(this);
 		this.encounter = new Encounter(this);

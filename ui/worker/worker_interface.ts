@@ -1,4 +1,4 @@
-import type { SimRequest, WorkerReceiveMessage, WorkerSendMessage } from './types';
+import type { SimRequest, WorkerReceiveMessage, WorkerSendMessage, WorkerSendMessageError } from './types';
 
 export type HandlerProgressCallback = (outputData: Uint8Array) => void;
 export type HandlerFunction = (data: Uint8Array, progress: HandlerProgressCallback, id: string, msg: SimRequest) => Uint8Array | Promise<Uint8Array>;
@@ -57,5 +57,14 @@ export class WorkerInterface {
 	 */
 	ready(isWasm: boolean) {
 		this.postMessage({ msg: 'ready', outputData: new Uint8Array([+isWasm]) });
+	}
+
+	/**
+	 * Notify the UI of an error in the worker.
+	 * @param errorString
+	 */
+	static error(error: Error) {
+		const msg: WorkerSendMessageError = { msg: 'workerError', error };
+		postMessage(msg);
 	}
 }

@@ -42,7 +42,7 @@ export type WorkerReceiveMessage = WorkerReceiveMessageSetId | WorkerReceiveMess
 /**
  * What the Worker sends to the UI
  */
-export type WorkerSendMessageType = 'ready' | 'idConfirm' | 'progress' | keyof typeof SimRequest;
+export type WorkerSendMessageType = 'ready' | 'idConfirm' | 'progress' | 'workerError' | keyof typeof SimRequest;
 
 export interface WorkerSendMessageBodyBase {
 	id?: string;
@@ -62,8 +62,13 @@ export interface WorkerSendMessageProgress extends Required<WorkerSendMessageBod
 	msg: 'progress';
 }
 
+export interface WorkerSendMessageError extends WorkerSendMessageBodyBase {
+	msg: 'workerError';
+	error: Error;
+}
+
 export interface WorkerSendMessageSimRequest extends Required<WorkerSendMessageBodyBase>, Required<Omit<WorkerReceiveMessageSimRequest, 'inputData'>> {
 	msg: SimRequest;
 }
 
-export type WorkerSendMessage = WorkerSendMessageReady | WorkerSendMessageIdConfirm | WorkerSendMessageProgress | WorkerSendMessageSimRequest;
+export type WorkerSendMessage = WorkerSendMessageReady | WorkerSendMessageIdConfirm | WorkerSendMessageProgress | WorkerSendMessageSimRequest | WorkerSendMessageError;

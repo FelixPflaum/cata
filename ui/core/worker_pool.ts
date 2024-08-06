@@ -24,7 +24,10 @@ import { SimSignals } from './sim_signal_manager';
 import { isDevMode, noop } from './utils';
 
 const SIM_WORKER_URL = `/${REPO_NAME}/sim_worker.js`;
+const MAX_WORKER_RESTARTS = 1;
 export type WorkerProgressCallback = (progressMetrics: ProgressMetrics) => void;
+
+type WorkerStateChangeCallback = (worker: SimWorker, change: 'ready' | 'disable' | 'error', error?: Error) => void;
 
 /**
  * Create random id for requests.
@@ -39,31 +42,106 @@ const generateRequestId = (type: SimRequest) => {
 export class WorkerPool {
 	private readonly workers: Array<SimWorker>;
 	private readonly workersDisabled: Array<SimWorker>;
+	private nextWorkerId = 1;
+	private errorAlertShown = false;
+	private readonly isWasmPromise: Promise<boolean>;
+	private isWasmPromiseResolver?: (isWasm: boolean) => void;
 
 	constructor(numWorkers: number) {
 		this.workers = [];
 		this.workersDisabled = [];
+		this.isWasmPromise = new Promise<boolean>(resolve => {
+			this.isWasmPromiseResolver = resolve;
+		});
 		this.setNumWorkers(numWorkers);
 	}
 
-	setNumWorkers(numWorkers: number) {
+	private onWorkerStateChange: WorkerStateChangeCallback = (worker, change, error) => {
+		if (change == 'error') {
+			const errorString = error instanceof Error ? error.message : 'undefined error';
+			console.error(`Worker ${worker.workerId} failed due to an error: ${errorString}`);
+
+			// Attempt reload of worker instance
+			if (worker.restartCount < MAX_WORKER_RESTARTS) {
+				console.log(`Attempting to reinitialize worker ${worker.workerId}`);
+				worker.disable(true);
+				worker.restartCount++;
+				worker.enable();
+				return;
+			}
+
+			// This worker failed and can't be saved, oh no!
+			// Remove entirely and decrement worker count.
+			worker.disable(true);
+			for (let i = 0; i < this.workers.length; i++) {
+				if (this.workers[i].workerId == worker.workerId) {
+					this.workers.splice(i);
+					break;
+				}
+			}
+
+			console.error(`Worker ${worker.workerId} failed to reinitialize after an error, letting it go :(`);
+
+			// TODO: "Temporary" error handling.
+			// Users of the workerpool functions should also react to promise rejections
+			// and async sim operations should get an error payload in their onProgress() handler.
+			//
+			// This here is just so users get SOME feedback if workers fail entirely.
+			//
+			// Could also expose an event and tell worker state/count changes and show worker state in the UI nicely.
+			const remainingWorkers = this.workers.length;
+			if (remainingWorkers == 0) {
+				alert('All workers failed to load, sim will not work!\n\nThe browser console may have more details.\n\nError: ' + errorString);
+				return;
+			} else if (!this.errorAlertShown) {
+				alert(
+					'Failed to setup one or more workers! The should still work after this, but it will be slower.\n\nThe browser console may have more details.\n\nError: ' +
+						errorString,
+				);
+				this.errorAlertShown = true;
+			}
+		} else if (change == 'ready') {
+			worker.isWasmWorker().then(this.isWasmPromiseResolver);
+
+			if (worker.restartCount > 0) {
+				worker.restartCount = 0;
+				console.log(`Worker ${worker.workerId} successfully reinitialized after an error!`);
+			}
+		}
+	};
+
+	async setNumWorkers(numWorkers: number) {
+		numWorkers = Math.max(numWorkers, navigator.hardwareConcurrency);
+
+		if (this.workers.length == 0) {
+			this.workers[0] = new SimWorker(this.nextWorkerId, this.onWorkerStateChange);
+			this.nextWorkerId++;
+		}
+
+		// Wait for wasm result of first worker.
+		// We can ignore the rest of this if not running wasm.
+		if (!(await this.isWasmPromise)) return;
+
 		if (numWorkers < this.workers.length) {
 			for (let i = this.workers.length - 1; i >= numWorkers; i--) {
-				this.workers[i].disable();
-				this.workersDisabled[i] = this.workers[i];
+				const removedWorker = this.workers.pop();
+				if (removedWorker) {
+					removedWorker.disable();
+					this.workersDisabled.push(removedWorker);
+				}
 			}
-			this.workers.length = numWorkers;
 			return;
 		}
 
 		for (let i = 0; i < numWorkers; i++) {
 			if (!this.workers[i]) {
-				if (this.workersDisabled[i]) {
-					this.workers[i] = this.workersDisabled[i];
-					delete this.workersDisabled[i];
-					this.workers[i].enable();
+				const disabledWorker = this.workersDisabled.pop();
+				if (disabledWorker) {
+					disabledWorker.enable();
+					this.workers[i] = disabledWorker;
 				} else {
-					this.workers[i] = new SimWorker(i);
+					this.workers[i] = new SimWorker(this.nextWorkerId, this.onWorkerStateChange);
+					this.nextWorkerId++;
 				}
 			}
 		}
@@ -180,7 +258,15 @@ export class WorkerPool {
 	 * @returns True if workers are running wasm.
 	 */
 	isWasm() {
-		return this.workers[0].isWasmWorker();
+		return this.isWasmPromise;
+	}
+
+	/**
+	 * A promise that resolves when the first worker is ready.
+	 * Just an alias for isWasm() tbh.
+	 */
+	waitForAnyWorkerReady() {
+		return this.isWasmPromise;
 	}
 
 	/**
@@ -204,13 +290,9 @@ export class WorkerPool {
 		try {
 			worker.addSimTaskRunning(id, totalIterations);
 			worker.doApiCall(requestName, request, id);
-			const finalProgress: Promise<ProgressMetrics> = new Promise(resolve => {
+			const finalProgress: Promise<ProgressMetrics> = new Promise((resolve, reject) => {
 				// Add handler for the progress events
-				worker.addPromiseFunc(
-					this.getProgressName(id),
-					this.newProgressHandler(id, worker, onProgress, pm => resolve(pm)),
-					noop,
-				);
+				worker.addPromiseFunc(this.getProgressName(id), this.newProgressHandler(id, worker, onProgress, resolve, reject), noop);
 			});
 			return await finalProgress;
 		} finally {
@@ -223,6 +305,7 @@ export class WorkerPool {
 		worker: SimWorker,
 		onProgress: WorkerProgressCallback,
 		onFinal: (pm: ProgressMetrics) => void,
+		onError: (error: any) => void,
 	): (progressData: Uint8Array) => void {
 		return (progressData: any) => {
 			const progress = ProgressMetrics.fromBinary(progressData);
@@ -234,7 +317,7 @@ export class WorkerPool {
 				return;
 			}
 
-			worker.addPromiseFunc(this.getProgressName(id), this.newProgressHandler(id, worker, onProgress, onFinal), noop);
+			worker.addPromiseFunc(this.getProgressName(id), this.newProgressHandler(id, worker, onProgress, onFinal, onError), onError);
 		};
 	}
 }
@@ -242,22 +325,23 @@ export class WorkerPool {
 class SimWorker {
 	readonly workerId: number;
 	private readonly simTasksRunning: Record<string, { workLeft: number }>;
-	private taskIdsToPromiseFuncs: Record<string, [(result: any) => void, (error: any) => void]>;
+	private readonly taskIdsToPromiseFuncs: Record<string, [(result: any) => void, (error: any) => void]>;
+	private readonly onStateChangeCallback: WorkerStateChangeCallback;
 	private worker: Worker | undefined;
 	private onReady: Promise<void> | undefined;
 	private resolveReady: (() => void) | undefined;
+	private rejectReady: ((error: any) => void) | undefined;
 	private wasmWorker: boolean;
 	private shouldDestroy: boolean;
+	restartCount = 0;
 
-	constructor(id: number) {
+	constructor(id: number, onStateChange: WorkerStateChangeCallback) {
 		this.workerId = id;
 		this.simTasksRunning = {};
 		this.taskIdsToPromiseFuncs = {};
 		this.wasmWorker = false;
 		this.shouldDestroy = false;
-		this.onReady = new Promise((_resolve, _reject) => {
-			this.resolveReady = _resolve;
-		});
+		this.onStateChangeCallback = onStateChange;
 		this.setupWorker();
 		this.log('Created.');
 	}
@@ -267,6 +351,7 @@ class SimWorker {
 
 		this.onReady = new Promise((_resolve, _reject) => {
 			this.resolveReady = _resolve;
+			this.rejectReady = _reject;
 		});
 
 		this.worker = new window.Worker(SIM_WORKER_URL);
@@ -279,9 +364,22 @@ class SimWorker {
 					this.postMessage({ msg: 'setID', id: this.workerId.toString() });
 					this.resolveReady!();
 					this.setTaskActive('setup', false);
+					this.onStateChangeCallback(this, 'ready');
 					this.log(`Ready, isWasm: ${this.wasmWorker}`);
 					break;
 				case 'idConfirm':
+					break;
+				case 'workerError':
+					this.rejectReady!(data.error);
+					this.setTaskActive('setup', false);
+					this.onStateChangeCallback(this, 'error', data.error);
+					for (const taskId in this.simTasksRunning) {
+						delete this.simTasksRunning[taskId];
+					}
+					for (const taskId in this.taskIdsToPromiseFuncs) {
+						this.taskIdsToPromiseFuncs[taskId][1](data.error);
+						delete this.taskIdsToPromiseFuncs[taskId];
+					}
 					break;
 				default:
 					const promiseFuncs = this.taskIdsToPromiseFuncs[id];
@@ -377,10 +475,18 @@ class SimWorker {
 	disable(force = false) {
 		this.shouldDestroy = true;
 		if (!this.worker || (!force && this.getSimTaskWorkAmount())) return;
+		for (const taskId in this.simTasksRunning) {
+			delete this.simTasksRunning[taskId];
+		}
+		for (const taskId in this.taskIdsToPromiseFuncs) {
+			delete this.taskIdsToPromiseFuncs[taskId];
+		}
+		this.onStateChangeCallback(this, 'disable');
 		this.worker.terminate();
 		delete this.worker;
 		delete this.onReady;
 		delete this.resolveReady;
+		delete this.rejectReady;
 		this.log('Disabled.');
 	}
 

@@ -46,10 +46,24 @@ globalThis.wasmready = function () {
 const go = new Go();
 let inst: WebAssembly.Instance | null = null;
 
-WebAssembly.instantiateStreaming(fetch('lib.wasm'), go.importObject).then(async result => {
-	inst = result.instance;
-	// console.log("loading wasm...")
-	await go.run(inst);
-});
+function getURL() {
+	const rnd = Math.random();
+	if (rnd > 0.8) return "kekw.wasm";
+	return "lib.wasm";
+}
+
+WebAssembly.instantiateStreaming(fetch(getURL()), go.importObject)
+	.then(async result => {
+		inst = result.instance;
+		await go.run(inst);
+	})
+	.catch(error => {
+		console.error(error);
+		if (error instanceof Error) {
+			WorkerInterface.error(error);
+		} else {
+			WorkerInterface.error(new Error('unknown error'));
+		}
+	});
 
 export {};
