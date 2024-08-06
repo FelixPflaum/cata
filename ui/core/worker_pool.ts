@@ -28,7 +28,7 @@ const MAX_WORKER_RESTARTS = 1;
 export type WorkerProgressCallback = (progressMetrics: ProgressMetrics) => void;
 
 type WorkerStateChangeCallback = (worker: SimWorker, change: 'ready' | 'disable' | 'error', error?: Error) => void;
-type WorkerPoolWorkerNumCallback = (enabled: number, ready: number, numSet: number) => void;
+type WorkerPoolWorkerNumCallback = (numSet: number, ready: number, failed:number) => void;
 
 /**
  * Create random id for requests.
@@ -45,6 +45,7 @@ export class WorkerPool {
 	private readonly workersDisabled: Array<SimWorker>;
 	private nextWorkerId = 1;
 	private targetWorkerCount = 0;
+	private failedWorkerCount = 0;
 	private readonly isWasmPromise: Promise<boolean>;
 	private isWasmPromiseResolver?: (isWasm: boolean) => void;
 	private readonly workerNumChangedCallback: WorkerPoolWorkerNumCallback;
@@ -75,6 +76,7 @@ export class WorkerPool {
 
 			// This worker failed and can't be saved, oh no!
 			// Remove entirely and decrement worker count.
+			this.failedWorkerCount++;
 			worker.disable(true);
 			for (let i = 0; i < this.workers.length; i++) {
 				if (this.workers[i].workerId == worker.workerId) {
@@ -103,13 +105,13 @@ export class WorkerPool {
 		this.workers.forEach(w => {
 			if (w.isReady) numReady++;
 		});
-		this.workerNumChangedCallback(this.workers.length, numReady, this.targetWorkerCount);
+		this.workerNumChangedCallback(this.targetWorkerCount, numReady, this.failedWorkerCount);
 	};
 
 	async setNumWorkers(numWorkers: number) {
-		numWorkers = Math.max(numWorkers, navigator.hardwareConcurrency);
+		this.targetWorkerCount = Math.max(numWorkers, navigator.hardwareConcurrency);
+		this.failedWorkerCount = 0;
 
-		this.targetWorkerCount = 1;
 		if (this.workers.length == 0) {
 			this.workers[0] = new SimWorker(this.nextWorkerId, this.onWorkerStateChange);
 			this.nextWorkerId++;
@@ -118,10 +120,9 @@ export class WorkerPool {
 		// Wait for wasm result of first worker.
 		// We can ignore the rest of this if not running wasm.
 		if (!(await this.isWasmPromise)) return;
-		this.targetWorkerCount = numWorkers;
 
-		if (numWorkers < this.workers.length) {
-			for (let i = this.workers.length - 1; i >= numWorkers; i--) {
+		if (this.targetWorkerCount < this.workers.length) {
+			for (let i = this.workers.length - 1; i >= this.targetWorkerCount; i--) {
 				const removedWorker = this.workers.pop();
 				if (removedWorker) {
 					removedWorker.disable();
@@ -131,7 +132,7 @@ export class WorkerPool {
 			return;
 		}
 
-		for (let i = 0; i < numWorkers; i++) {
+		for (let i = 0; i < this.targetWorkerCount; i++) {
 			if (!this.workers[i]) {
 				const disabledWorker = this.workersDisabled.pop();
 				if (disabledWorker) {

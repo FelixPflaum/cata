@@ -115,7 +115,7 @@ export class Sim {
 	readonly useSoftCapBreakpointsChangeEmitter = new TypedEvent<void>();
 	readonly languageChangeEmitter = new TypedEvent<void>();
 	readonly crashEmitter = new TypedEvent<SimError>();
-	readonly workerNumChangeEmitter = new TypedEvent<{ enabled: number; ready: number, numSet: number }>();
+	readonly workerNumChangeEmitter = new TypedEvent<{ numSet: number; ready: number; failed: number }>();
 
 	// Emits when any of the settings change (but not the raid / encounter).
 	readonly settingsChangeEmitter: TypedEvent<void>;
@@ -155,8 +155,8 @@ export class Sim {
 			}
 		}
 		this.setWasmConcurrency(TypedEvent.nextEventID(), wasmConcurrencySetting);
-		this.workerPool = new WorkerPool(wasmConcurrencySetting, (enabled, ready, numSet) => {
-			this.workerNumChangeEmitter.emit(TypedEvent.nextEventID(), { enabled, ready, numSet });
+		this.workerPool = new WorkerPool(wasmConcurrencySetting, (numSet, ready, failed) => {
+			this.workerNumChangeEmitter.emit(TypedEvent.nextEventID(), { numSet, ready, failed });
 		});
 		this.wasmConcurrencyChangeEmitter.on(async () => this.workerPool.setNumWorkers(this.wasmConcurrency));
 

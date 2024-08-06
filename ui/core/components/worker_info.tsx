@@ -40,12 +40,13 @@ export const buildWorkerInfo = (parent: JSX.Element | null, sim: Sim, hideParent
 			iconRef.value!.style.display = 'none';
 			toolTip.setContent('All workers running.');
 		} else {
-			iconRef.value!.className = 'fas fa-exclamation-triangle link-warning';
 			iconRef.value!.style.display = '';
-			if (nums.numSet != nums.enabled) {
+			if (nums.failed) {
+				iconRef.value!.className = 'fas fa-exclamation-triangle link-warning';
 				toolTip.setContent('Some workers failed to load! Number of workers was reduced. The browser console may have more details.');
-				status += ` (${nums.numSet - nums.enabled} failed!)`
+				status += ` (${nums.failed} failed!)`
 			} else {
+				iconRef.value!.className = 'fas fa-spinner fa-spin';
 				toolTip.setContent('Workers are still loading!');
 			}
 		}
