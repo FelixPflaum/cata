@@ -153,9 +153,14 @@ export class WorkerPool {
 		return this.workers.length;
 	}
 
-	private async getLeastBusyWorker(): Promise<SimWorker> {
-		// Make sure we have at least one ready worker in case calling functions don't make sure of it.
-		await this.isWasmPromise;
+	/**
+	 * IMPORTANT: Wait for first worker to be ready before calling this!
+	 *
+	 * NO, do NOT make this async. Load balancing/concurrency will stop working if you do!
+	 * If you want to make this nicer you have to change the async request handlers so
+	 * they add their "work count" to the SimWorker before other requests have a chance to pick the same worker.
+	 */
+	private getLeastBusyWorker(): SimWorker {
 		return this.workers.reduce((curMinWorker, nextWorker) => {
 			if (curMinWorker.isReady && nextWorker.isReady) {
 				return curMinWorker.getSimTaskWorkAmount() < nextWorker.getSimTaskWorkAmount() ? curMinWorker : nextWorker;
@@ -165,8 +170,8 @@ export class WorkerPool {
 	}
 
 	async makeApiCall(requestName: SimRequest, request: Uint8Array): Promise<Uint8Array> {
-		const worker = await this.getLeastBusyWorker();
-		return await worker.doApiCall(requestName, request, generateRequestId(requestName));
+		await this.isWasmPromise;
+		return await this.getLeastBusyWorker().doApiCall(requestName, request, generateRequestId(requestName));
 	}
 
 	async computeStats(request: ComputeStatsRequest): Promise<ComputeStatsResult> {
@@ -179,7 +184,8 @@ export class WorkerPool {
 	}
 
 	async statWeightsAsync(request: StatWeightsRequest, onProgress: WorkerProgressCallback, signals: SimSignals): Promise<StatWeightsResult> {
-		const worker = await this.getLeastBusyWorker();
+		await this.isWasmPromise;
+		const worker = this.getLeastBusyWorker();
 		worker.log('Stat weights request: ' + StatWeightsRequest.toJsonString(request));
 		const id = generateRequestId(SimRequest.statWeightsAsync);
 
@@ -205,7 +211,8 @@ export class WorkerPool {
 	}
 
 	async bulkSimAsync(request: BulkSimRequest, onProgress: WorkerProgressCallback, signals: SimSignals): Promise<BulkSimResult> {
-		const worker = await this.getLeastBusyWorker();
+		await this.isWasmPromise;
+		const worker = this.getLeastBusyWorker();
 		worker.log('bulk sim request: ' + BulkSimRequest.toJsonString(request, { enumAsInteger: true }));
 		const id = generateRequestId(SimRequest.bulkSimAsync);
 
@@ -223,17 +230,14 @@ export class WorkerPool {
 
 	// Calculate combos and return counts
 	async bulkSimCombosAsync(request: BulkSimCombosRequest): Promise<BulkSimCombosResult> {
-		const worker = await this.getLeastBusyWorker();
-		worker.log('bulk sim combinations request: ' + BulkSimCombosRequest.toJsonString(request, { enumAsInteger: true }));
-		const id = generateRequestId(SimRequest.bulkSimCombos);
-
-		// Now start the async sim
-		const resultData = await worker.doApiCall(SimRequest.bulkSimCombos, BulkSimCombosRequest.toBinary(request), id);
+		if (isDevMode()) console.log('bulk sim combinations request: ' + BulkSimCombosRequest.toJsonString(request, { enumAsInteger: true }));
+		const resultData = await this.makeApiCall(SimRequest.bulkSimCombos, BulkSimCombosRequest.toBinary(request));
 		return BulkSimCombosResult.fromBinary(resultData);
 	}
 
 	async raidSimAsync(request: RaidSimRequest, onProgress: WorkerProgressCallback, signals: SimSignals): Promise<RaidSimResult> {
-		const worker = await this.getLeastBusyWorker();
+		await this.isWasmPromise;
+		const worker = this.getLeastBusyWorker();
 		worker.log('Raid sim request: ' + RaidSimRequest.toJsonString(request));
 		const id = generateRequestId(SimRequest.raidSimAsync);
 
