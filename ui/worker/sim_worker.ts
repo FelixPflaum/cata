@@ -46,13 +46,7 @@ globalThis.wasmready = function () {
 const go = new Go();
 let inst: WebAssembly.Instance | null = null;
 
-function getURL() {
-	const rnd = Math.random();
-	if (rnd > 0.8) return "kekw.wasm";
-	return "lib.wasm";
-}
-
-WebAssembly.instantiateStreaming(fetch(getURL()), go.importObject)
+WebAssembly.instantiateStreaming(fetch('lib.wasm'), go.importObject)
 	.then(async result => {
 		inst = result.instance;
 		await go.run(inst);
